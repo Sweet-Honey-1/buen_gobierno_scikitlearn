@@ -145,6 +145,16 @@ def create_analysis_run() -> Optional[str]:
     data = response.data or []
     return data[0]["id"] if data else None
 
+def fetch_processed_answers(limit: int = 5000):
+    response = (
+        supabase.table("answers_raw")
+        .select("id, nombre, ubicacion, dolencia, status, created_at")
+        .eq("status", "processed")
+        .order("created_at", desc=False)
+        .limit(limit)
+        .execute()
+    )
+    return response.data or []
 
 def finish_analysis_run(
     run_id: Optional[str],

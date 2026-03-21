@@ -11,6 +11,7 @@ from app.geo_peru import PROVINCIAS_PERU, PROVINCIAS_VALIDAS
 from app.supabase_repository import (
     fetch_pending_answers,
     fetch_pending_asks,
+    fetch_processed_answers,
     insert_answers_raw,
     insert_asks_raw,
     mark_answers_processing,
@@ -29,7 +30,7 @@ load_dotenv()
 
 app = FastAPI(
     title="API de Mapeo Social - Buen Gobierno",
-    version="5.1.0"
+    version="5.2.0"
 )
 
 app.add_middleware(
@@ -46,7 +47,7 @@ def healthcheck():
     return {
         "status": "ok",
         "service": "API de Mapeo Social - Buen Gobierno",
-        "version": "5.1.0"
+        "version": "5.2.0"
     }
 
 
@@ -57,11 +58,6 @@ def listar_provincias():
         "items": PROVINCIAS_PERU
     }
 
-
-# =========================================================
-# ENDPOINTS DE INGESTA
-# FastAPI guarda en Supabase.
-# =========================================================
 
 @app.post("/api/answers/lote", tags=["Recolección"])
 def registrar_dolencias_lote(answers: List[UserAnswer]):
@@ -121,10 +117,6 @@ def registrar_preguntas_lote(asks: List[UserAsk]):
     }
 
 
-# =========================================================
-# ENDPOINTS INTERNOS DE LECTURA DESDE SUPABASE
-# =========================================================
-
 @app.get("/internal/pending-answers", tags=["Interno"])
 def get_pending_answers(limit: int = 100):
     items = fetch_pending_answers(limit=limit)
@@ -142,10 +134,6 @@ def get_pending_asks(limit: int = 100):
         "items": items
     }
 
-
-# =========================================================
-# ANÁLISIS INDIVIDUAL
-# =========================================================
 
 @app.post("/api/analizar-texto", tags=["Análisis de Campaña"])
 def analizar_texto(payload: UserAnswer):
@@ -166,11 +154,6 @@ def analizar_texto(payload: UserAnswer):
     }
 
 
-# =========================================================
-# PROCESAMIENTO DE PENDIENTES DESDE SUPABASE
-# SIN VALIDACIÓN DE CRON_SECRET PARA PRUEBAS LOCALES
-# =========================================================
-
 @app.post("/internal/process-pending", tags=["Interno"])
 def process_pending_jobs():
     run_id = create_analysis_run()
@@ -182,6 +165,22 @@ def process_pending_jobs():
     total_asks_read = len(pending_asks)
 
     if not pending_answers and not pending_asks:
+        processed_answers = fetch_processed_answers(limit=5000)
+
+        if processed_answers:
+            all_textos = [item["dolencia"] for item in processed_answers]
+            all_ubicaciones = [item["ubicacion"] for item in processed_answers]
+            all_nombres = [item["nombre"] for item in processed_answers]
+
+            dashboard_payload = {
+                "mapeo_geografico": agrupar_textos(
+                    textos=all_textos,
+                    ubicaciones=all_ubicaciones,
+                    nombres=all_nombres
+                )
+            }
+            upsert_dashboard_cache(dashboard_payload)
+
         finish_analysis_run(
             run_id=run_id,
             status="success",
@@ -207,17 +206,9 @@ def process_pending_jobs():
     try:
         analysis_rows: List[Dict[str, Any]] = []
 
-        textos = []
-        ubicaciones = []
-        nombres = []
-
         for item in pending_answers:
             geo = parsear_ubicacion_canonica(item["ubicacion"])
             analisis = analizar_texto_completo(item["dolencia"])
-
-            textos.append(item["dolencia"])
-            ubicaciones.append(item["ubicacion"])
-            nombres.append(item["nombre"])
 
             analysis_rows.append({
                 "answer_id": item["id"],
@@ -238,18 +229,24 @@ def process_pending_jobs():
 
         upsert_answer_analysis_results(analysis_rows)
 
-        if pending_answers:
+        mark_answers_processed(answer_ids)
+        mark_asks_processed(ask_ids)
+
+        processed_answers = fetch_processed_answers(limit=5000)
+
+        if processed_answers:
+            all_textos = [item["dolencia"] for item in processed_answers]
+            all_ubicaciones = [item["ubicacion"] for item in processed_answers]
+            all_nombres = [item["nombre"] for item in processed_answers]
+
             dashboard_payload = {
                 "mapeo_geografico": agrupar_textos(
-                    textos=textos,
-                    ubicaciones=ubicaciones,
-                    nombres=nombres
+                    textos=all_textos,
+                    ubicaciones=all_ubicaciones,
+                    nombres=all_nombres
                 )
             }
             upsert_dashboard_cache(dashboard_payload)
-
-        mark_answers_processed(answer_ids)
-        mark_asks_processed(ask_ids)
 
         finish_analysis_run(
             run_id=run_id,
@@ -263,6 +260,7 @@ def process_pending_jobs():
                 "dashboard_cache_key": "latest",
                 "processed_answer_ids": answer_ids,
                 "processed_ask_ids": ask_ids,
+                "processed_answers_total_historico": len(processed_answers)
             }
         )
 
@@ -270,6 +268,7 @@ def process_pending_jobs():
             "message": "Procesamiento exitoso",
             "processed_answers": len(answer_ids),
             "processed_asks": len(ask_ids),
+            "processed_answers_total_historico": len(processed_answers),
             "dashboard_cache_key": "latest"
         }
 
